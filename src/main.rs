@@ -1,6 +1,3 @@
-//! Optimism-specific constants, types, and helpers.
-#![cfg_attr(not(test), warn(unused_crate_dependencies))]
-
 use alloy_consensus::Transaction;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_provider::{Provider, ProviderBuilder, network::primitives::BlockTransactions};
@@ -39,10 +36,13 @@ impl Write for FlushWriter {
     }
 }
 
+// This API key is acquired from <developer.metamask.io> and looks something like `c60b0bb42f8a4c6481ecd229eddaca27`
+const API_KEY: &str = include_str!("../.config/API_KEY_METAMASK");
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Set up the HTTP transport which is consumed by the RPC client.
-    let rpc_url = "https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27".parse()?;
+    let rpc_url = format!("https://mainnet.infura.io/v3/{API_KEY}").parse()?;
 
     // Create a provider
     let client = ProviderBuilder::new().on_http(rpc_url);
@@ -86,32 +86,34 @@ async fn main() -> anyhow::Result<()> {
             c.chain_id = chain_id;
         });
 
+    std::fs::create_dir_all("target/traces")?;
+
     let write = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open("traces/0.json");
+        .open("target/traces/0.jsonl");
     let inner = Arc::new(Mutex::new(BufWriter::new(
         write.expect("Failed to open file"),
     )));
     let writer = FlushWriter::new(Arc::clone(&inner));
     let mut evm = ctx.build_mainnet_with_inspector(TracerEip3155::new(Box::new(writer)));
 
-    let txs = block.transactions.len();
-    println!("Found {txs} transactions.");
+    let txs = block.transactions.len().min(5);
+    println!(
+        "Found {} transactions. (Fetching the first {txs}.)",
+        block.transactions.len()
+    );
 
     let console_bar = Arc::new(ProgressBar::new(txs as u64));
     let start = Instant::now();
-
-    // Create the traces directory if it doesn't exist
-    std::fs::create_dir_all("traces").expect("Failed to create traces directory");
 
     // Fill in CfgEnv
     let BlockTransactions::Full(transactions) = block.transactions else {
         panic!("Wrong transaction type")
     };
 
-    for tx in transactions {
+    for tx in transactions.iter().take(txs) {
         evm.modify_tx(|etx| {
             etx.caller = tx.inner.signer();
             etx.gas_limit = tx.gas_limit();
@@ -135,15 +137,14 @@ async fn main() -> anyhow::Result<()> {
 
         // Construct the file writer to write the trace to
         let tx_number = tx.transaction_index.unwrap_or_default();
-        let file_name = format!("traces/{}.json", tx_number);
+        let file_name = format!("target/traces/{}.jsonl", tx_number);
         let write = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(file_name);
-        let inner = Arc::new(Mutex::new(BufWriter::new(
-            write.expect("Failed to open file"),
-        )));
+            .open(file_name)
+            .expect("Failed to open file");
+        let inner = Arc::new(Mutex::new(BufWriter::new(write)));
         let writer = FlushWriter::new(Arc::clone(&inner));
 
         // Inspect and commit the transaction to the EVM
