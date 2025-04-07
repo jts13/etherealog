@@ -4,3 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+revm = { version = "20.0.0", features = ["alloydb", "serde-json"] }
+alloy-consensus = "0.12"
+alloy-eips = "0.12"
+alloy-provider = "0.12"
+indicatif = "0.17.11"
+
+tokio = { version = "1.43.0", features = ["full"] }
+anyhow = "1.0.96"
