@@ -1,0 +1,82 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "etherealog",
+    "version": "0.0.0"
+  },
+  "paths": {
+    "/api/isolate/eval/{code}": {
+      "post": {
+        "operationId": "eval",
+        "summary": "Executes the provided EVM code.",
+        "description": "Executes the provided EVM code.",
+        "parameters": [
+          {
+            "name": "code",
+            "in": "path",
+            "description": "",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "example": "604080536040604055604060006040600060ff5afa6040f3"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/isolate/transaction": {
+      "post": {
+        "operationId": "transaction",
+        "summary": "Executes the provided transaction.",
+        "description": "Executes the provided transaction.",
+        "parameters": [],
+        "requestBody": {
+          "description": "",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              },
+              "examples": {
+                "foo": {
+                  "summary": "...",
+                  "value": {
+                    "foo": "foo-bar",
+                    "bar": "baz-buz"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+  }
+}
