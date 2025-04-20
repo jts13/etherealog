@@ -56,17 +56,18 @@ type LegacyTx struct {
 // journal: The journal is a wrapper around the state that tracks changes and allows for e.g. rollbacks.
 
 use revm::context::result::{EVMError, ResultAndState};
-use revm::context::{ContextTr, Evm, TxEnv};
+use revm::context::{ContextTr, Evm, JournalTr, TxEnv};
 use revm::database::EmptyDB;
 use revm::handler::EthPrecompiles;
 use revm::handler::instructions::EthInstructions;
 use revm::inspector::InspectorEvmTr;
+use revm::inspector::inspectors::GasInspector;
 use revm::interpreter::interpreter::EthInterpreter;
-use revm::interpreter::interpreter_types::{Jumps, LoopControl};
+use revm::interpreter::interpreter_types::{Jumps, LoopControl, MemoryTr};
 use revm::interpreter::{
     CallInputs, CallOutcome, CreateInputs, CreateOutcome, EOFCreateInputs, Interpreter,
 };
-use revm::primitives::{Address, Log, U256};
+use revm::primitives::{Address, Log, U256, hex};
 use revm::state::Account;
 use revm::{Context, InspectEvm, Inspector, MainContext};
 use serde::Serialize;
@@ -78,14 +79,14 @@ pub struct Engine<I> {
 
 impl<I: Inspector<Context>> Engine<I> {
     pub fn new(inspector: I) -> Self {
-        let evm = Evm::new_with_inspector(
-            Context::mainnet().with_db(EmptyDB::default()),
-            inspector, // Tracer::new(),
-            EthInstructions::new_mainnet(),
-            EthPrecompiles::default(),
-        );
-
-        Self { evm }
+        Self {
+            evm: Evm::new_with_inspector(
+                Context::mainnet().with_db(EmptyDB::default()),
+                inspector,
+                EthInstructions::new_mainnet(),
+                EthPrecompiles::default(),
+            ),
+        }
     }
 
     pub fn inspector(&mut self) -> &mut I {
@@ -118,16 +119,51 @@ impl<I: Inspector<Context>> Engine<I> {
 //   * memory
 //   * storage
 
+#[derive(Debug, PartialEq)]
+struct StepPre {
+    pc: usize,
+    op: u8,
+    gas: u64,
+    stack: Box<[U256]>,
+    memory: Option<String>,
+}
+
+#[derive(Debug, Default, PartialEq, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "camelCase")]
+pub struct Step {
+    /// Program Counter
+    pc: usize,
+    /// OpCode
+    op: u8,
+    /// Gas left before executing this operation
+    gas: u64, // U256,
+    /// Gas cost of this operation
+    gas_cost: u64, // U256,
+    /// Array of all values on the stack
+    stack: Box<[U256]>,
+    /// Depth of the call stack
+    depth: u64,
+    /// Description of an error (should contain revert reason if supported)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    // TODO(toms): array? string?
+    /// Array of all allocated values
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    memory: Option<String>,
+    // /// Data returned by function call
+    // return_data: Hex-String,
+    // /// Amount of global gas refunded
+    // refund: U256,
+    // /// Array of all stored values
+    // storage: Key-Value,
+}
+
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "camelCase")]
 pub enum Event {
-    Step {
-        pc: usize,
-        opcode: u8,
-        stack: Box<[U256]>,
-        gas_remaining: u64,
-    },
+    Step(Step),
 }
 
 // TODO(toms): Summary (from https://eips.ethereum.org/EIPS/eip-3155)
@@ -143,12 +179,18 @@ pub trait TracerDelegate {
 }
 
 pub struct Tracer<D> {
+    gas_inspector: GasInspector,
+    step: Option<StepPre>,
     delegate: D,
 }
 
 impl<D> Tracer<D> {
     pub fn new(delegate: D) -> Self {
-        Self { delegate }
+        Self {
+            gas_inspector: GasInspector::new(),
+            step: None,
+            delegate,
+        }
     }
 
     pub fn get(&mut self) -> &mut D {
@@ -157,52 +199,93 @@ impl<D> Tracer<D> {
 }
 
 impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
-    fn initialize_interp(&mut self, _interpreter: &mut Interpreter, ctx: &mut Context) {
+    fn initialize_interp(&mut self, interpreter: &mut Interpreter, _ctx: &mut Context) {
+        self.gas_inspector
+            .initialize_interp(interpreter.control.gas());
+
         // TODO(toms): include initial stipend, etc. (InitialAndFloorGas) in trace log?
-        println!(
-            ">>> initialize_interp: {:?}",
-            (&ctx.tx, &ctx.block, &ctx.cfg)
-        );
+        // println!(
+        //     ">>> initialize_interp: {:?}",
+        //     (&ctx.tx, &ctx.block, &ctx.cfg)
+        // );
     }
 
     fn step(&mut self, interpreter: &mut Interpreter, _ctx: &mut Context) {
+        self.gas_inspector.step(interpreter.control.gas());
+
         let pc = interpreter.bytecode.pc();
         let opcode = interpreter.bytecode.opcode();
         let stack = interpreter.stack.data();
         let gas_remaining = interpreter.control.gas().remaining();
 
-        // println!(
-        //     "pc={pc:?} opcode={opcode:?} stack={stack:?} memSize={} gas_remaining=0x{gas_remaining:x}",
-        //     interpreter.memory.size()
-        // );
-
-        self.delegate.emit(Event::Step {
+        assert_eq!(self.step, None, "Should be empty - consumed by `step_end`");
+        self.step = Some(StepPre {
             pc,
-            opcode,
+            op: opcode,
             stack: stack.clone().into_boxed_slice(),
-            gas_remaining,
+            gas: gas_remaining,
+            memory: if interpreter.memory.size() == 0 {
+                None
+            } else {
+                // TODO(toms): encode as base64 instead? (to save space)
+                Some(hex::encode_prefixed(
+                    interpreter
+                        .memory
+                        .slice(0..interpreter.memory.size())
+                        .as_ref(),
+                ))
+            },
         });
+
+        // self.memory = if self.include_memory {
+        //     Some(hex::encode_prefixed(
+        //         interp.memory.slice(0..interp.memory.size()).as_ref(),
+        //     ))
+        // } else {
+        //     None
+        // };
+
+        // self.refunded = interp.control.gas().refunded();
     }
 
-    fn step_end(&mut self, _interpreter: &mut Interpreter, _ctx: &mut Context) {
+    fn step_end(&mut self, interpreter: &mut Interpreter, ctx: &mut Context) {
         // println!(">>> step_end");
+
+        self.gas_inspector.step_end(interpreter.control.gas_mut());
+
+        let step = self.step.take().unwrap();
+
+        self.delegate.emit(Event::Step(Step {
+            pc: step.pc,
+            op: step.op,
+            stack: step.stack,
+            gas: step.gas,
+            gas_cost: self.gas_inspector.last_gas_cost(),
+            depth: ctx.journal().depth() as u64,
+            error: {
+                let result = interpreter.control.instruction_result();
+                (result.is_error() || result.is_revert()).then(|| format!("{:?}", result))
+            },
+            memory: step.memory,
+        }));
     }
 
     fn log(&mut self, _interpreter: &mut Interpreter, _ctx: &mut Context, _log: Log) {
-        println!(">>> log");
+        // println!(">>> log");
     }
 
     fn call(&mut self, _ctx: &mut Context, _inputs: &mut CallInputs) -> Option<CallOutcome> {
-        println!(">>> call");
+        // println!(">>> call");
         None
     }
 
-    fn call_end(&mut self, _ctx: &mut Context, _inputs: &CallInputs, _outcome: &mut CallOutcome) {
-        println!(">>> call_end");
+    fn call_end(&mut self, _ctx: &mut Context, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+        // println!(">>> call_end");
+        self.gas_inspector.call_end(outcome);
     }
 
     fn create(&mut self, _ctx: &mut Context, _inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        println!(">>> create");
+        // println!(">>> create");
         None
     }
 
@@ -210,9 +293,10 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
         &mut self,
         _ctx: &mut Context,
         _inputs: &CreateInputs,
-        _outcome: &mut CreateOutcome,
+        outcome: &mut CreateOutcome,
     ) {
-        println!(">>> create_end");
+        // println!(">>> create_end");
+        self.gas_inspector.create_end(outcome);
     }
 
     fn eofcreate(
@@ -220,7 +304,7 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
         _ctx: &mut Context,
         _inputs: &mut EOFCreateInputs,
     ) -> Option<CreateOutcome> {
-        println!(">>> eofcreate");
+        // println!(">>> eofcreate");
         None
     }
 
@@ -230,11 +314,11 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
         _inputs: &EOFCreateInputs,
         _outcome: &mut CreateOutcome,
     ) {
-        println!(">>> eofcreate_end");
+        // println!(">>> eofcreate_end");
     }
 
     fn selfdestruct(&mut self, _contract: Address, _target: Address, _value: U256) {
-        println!(">>> selfdestruct");
+        // println!(">>> selfdestruct");
     }
 }
 
@@ -355,28 +439,10 @@ mod tests {
             })
             .unwrap();
 
-        // https://eips.ethereum.org/EIPS/eip-3155#test-cases
-        //
+        // # https://eips.ethereum.org/EIPS/eip-3155#test-cases
         // λ evm run --code '0x604080536040604055604060006040600060ff5afa6040f3'
         //     --json --debug --dump --nomemory=false --noreturndata=false
         //     --sender '0xF0' --receiver '0xF1' --gas 10000000000
-        //
-        // {"opName":"PUSH1","pc":0,"op":96,"gas":"0x2540be400","gasCost":"0x3","memSize":0,"stack":[],"depth":1,"refund":0}
-        // {"opName":"DUP1","pc":2,"op":128,"gas":"0x2540be3fd","gasCost":"0x3","memSize":0,"stack":["0x40"],"depth":1,"refund":0}
-        // {"opName":"MSTORE8","pc":3,"op":83,"gas":"0x2540be3fa","gasCost":"0xc","memSize":0,"stack":["0x40","0x40"],"depth":1,"refund":0}
-        // {"opName":"PUSH1","pc":4,"op":96,"gas":"0x2540be3ee","gasCost":"0x3","memSize":96,"stack":[],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"PUSH1","pc":6,"op":96,"gas":"0x2540be3eb","gasCost":"0x3","memSize":96,"stack":["0x40"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"SSTORE","pc":8,"op":85,"gas":"0x2540be3e8","gasCost":"0x5654","memSize":96,"stack":["0x40","0x40"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"PUSH1","pc":9,"op":96,"gas":"0x2540b8d94","gasCost":"0x3","memSize":96,"stack":[],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"PUSH1","pc":11,"op":96,"gas":"0x2540b8d91","gasCost":"0x3","memSize":96,"stack":["0x40"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"PUSH1","pc":13,"op":96,"gas":"0x2540b8d8e","gasCost":"0x3","memSize":96,"stack":["0x40","0x0"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"PUSH1","pc":15,"op":96,"gas":"0x2540b8d8b","gasCost":"0x3","memSize":96,"stack":["0x40","0x0","0x40"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"PUSH1","pc":17,"op":96,"gas":"0x2540b8d88","gasCost":"0x3","memSize":96,"stack":["0x40","0x0","0x40","0x0"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"GAS","pc":19,"op":90,"gas":"0x2540b8d85","gasCost":"0x2","memSize":96,"stack":["0x40","0x0","0x40","0x0","0xff"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"STATICCALL","pc":20,"op":250,"gas":"0x2540b8d83","gasCost":"0x24abb5f76","memSize":96,"stack":["0x40","0x0","0x40","0x0","0xff","0x2540b8d83"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"PUSH1","pc":21,"op":96,"gas":"0x2540b835b","gasCost":"0x3","memSize":96,"stack":["0x1"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"opName":"RETURN","pc":23,"op":243,"gas":"0x2540b8358","gasCost":"0x0","memSize":96,"stack":["0x1","0x40"],"depth":1,"refund":0,"memory":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000"}
-        // {"output":"40","gasUsed":"0x60a8"}
 
         // TODO(toms): check result.state?
         assert_eq!(
@@ -390,101 +456,164 @@ mod tests {
             }
         );
 
-        assert_eq!(
-            engine.inspector().delegate.events,
-            &[
-                Event::Step {
-                    pc: 0,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([]),
-                    gas_remaining: 16756216
-                },
-                Event::Step {
-                    pc: 2,
-                    opcode: opcode::DUP1, // 128
-                    stack: stack([64]),
-                    gas_remaining: 16756213
-                },
-                Event::Step {
-                    pc: 3,
-                    opcode: opcode::MSTORE8, // 83
-                    stack: stack([64, 64]),
-                    gas_remaining: 16756210
-                },
-                Event::Step {
-                    pc: 4,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([]),
-                    gas_remaining: 16756198
-                },
-                Event::Step {
-                    pc: 6,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([64]),
-                    gas_remaining: 16756195
-                },
-                Event::Step {
-                    pc: 8,
-                    opcode: opcode::SSTORE, // 85
-                    stack: stack([64, 64]),
-                    gas_remaining: 16756192
-                },
-                Event::Step {
-                    pc: 9,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([]),
-                    gas_remaining: 16734092
-                },
-                Event::Step {
-                    pc: 11,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([64]),
-                    gas_remaining: 16734089
-                },
-                Event::Step {
-                    pc: 13,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([64, 0]),
-                    gas_remaining: 16734086
-                },
-                Event::Step {
-                    pc: 15,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([64, 0, 64]),
-                    gas_remaining: 16734083
-                },
-                Event::Step {
-                    pc: 17,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([64, 0, 64, 0]),
-                    gas_remaining: 16734080
-                },
-                Event::Step {
-                    pc: 19,
-                    opcode: opcode::GAS, // 90
-                    stack: stack([64, 0, 64, 0, 255]),
-                    gas_remaining: 16734077
-                },
-                Event::Step {
-                    pc: 20,
-                    opcode: opcode::STATICCALL, // 250
-                    stack: stack([64, 0, 64, 0, 255, 16734075]),
-                    gas_remaining: 16734075
-                },
-                Event::Step {
-                    pc: 21,
-                    opcode: opcode::PUSH1, // 96
-                    stack: stack([1]),
-                    gas_remaining: 16731475
-                },
-                Event::Step {
-                    pc: 23,
-                    opcode: opcode::RETURN, // 243
-                    stack: stack([1, 64]),
-                    gas_remaining: 16731472
-                }
-            ]
-        );
+        let memory = "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000";
+
+        let expected = &[
+            Event::Step(Step {
+                pc: 0,
+                op: opcode::PUSH1, // 96
+                gas: 16756216,
+                gas_cost: 3,
+                stack: stack([]),
+                depth: 1,
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 2,
+                op: opcode::DUP1, // 128
+                gas: 16756213,
+                gas_cost: 3,
+                stack: stack([64]),
+                depth: 1,
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 3,
+                op: opcode::MSTORE8, // 83
+                gas: 16756210,
+                gas_cost: 12,
+                stack: stack([64, 64]),
+                depth: 1,
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 4,
+                op: opcode::PUSH1, // 96
+                gas: 16756198,
+                gas_cost: 3,
+                stack: stack([]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 6,
+                op: opcode::PUSH1, // 96
+                gas: 16756195,
+                gas_cost: 3,
+                stack: stack([64]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 8,
+                op: opcode::SSTORE, // 85
+                gas: 16756192,
+                gas_cost: 22100,
+                stack: stack([64, 64]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 9,
+                op: opcode::PUSH1, // 96
+                gas: 16734092,
+                gas_cost: 3,
+                stack: stack([]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 11,
+                op: opcode::PUSH1, // 96
+                gas: 16734089,
+                gas_cost: 3,
+                stack: stack([64]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 13,
+                op: opcode::PUSH1, // 96
+                gas: 16734086,
+                gas_cost: 3,
+                stack: stack([64, 0]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 15,
+                op: opcode::PUSH1, // 96
+                gas: 16734083,
+                gas_cost: 3,
+                stack: stack([64, 0, 64]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 17,
+                op: opcode::PUSH1, // 96
+                gas: 16734080,
+                gas_cost: 3,
+                stack: stack([64, 0, 64, 0]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 19,
+                op: opcode::GAS, // 90
+                gas: 16734077,
+                gas_cost: 2,
+                stack: stack([64, 0, 64, 0, 255]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 20,
+                op: opcode::STATICCALL, // 250
+                gas: 16734075,
+                gas_cost: 16472646,
+                stack: stack([64, 0, 64, 0, 255, 16734075]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 21,
+                op: opcode::PUSH1, // 96
+                gas: 16731475,
+                gas_cost: 3,
+                stack: stack([1]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+            Event::Step(Step {
+                pc: 23,
+                op: opcode::RETURN, // 243
+                gas: 16731472,
+                gas_cost: 0,
+                stack: stack([1, 64]),
+                depth: 1,
+                memory: Some(memory.into()),
+                ..Default::default()
+            }),
+        ];
+
+        let actual = &engine.inspector().delegate.events;
+
+        assert_eq!(actual.len(), expected.len());
+        for (n, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(actual, expected, "Item {n} did not match!");
+        }
     }
 
     #[test]
@@ -546,18 +675,24 @@ mod tests {
         assert_eq!(
             engine.inspector().delegate.events,
             &[
-                Event::Step {
+                Event::Step(Step {
                     pc: 0,
-                    opcode: 96,
+                    op: opcode::PUSH1, // 96
                     stack: stack([]),
-                    gas_remaining: 29979000
-                },
-                Event::Step {
+                    gas: 29979000,
+                    gas_cost: 3,
+                    depth: 1,
+                    ..Default::default()
+                }),
+                Event::Step(Step {
                     pc: 2,
-                    opcode: 0,
+                    op: opcode::STOP, // 0
                     stack: stack([64]),
-                    gas_remaining: 29978997
-                }
+                    gas: 29978997,
+                    gas_cost: 0,
+                    depth: 1,
+                    ..Default::default()
+                })
             ]
         );
     }
