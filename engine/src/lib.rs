@@ -1,75 +1,20 @@
-// https://github.com/ethereum/go-ethereum/tree/master/cmd/evm
-/*
-// Map of address to account definition.
-type Alloc map[common.Address]Account
-// Genesis account. Each field is optional.
-type Account struct {
-    Code       []byte                           `json:"code"`
-    Storage    map[common.Hash]common.Hash      `json:"storage"`
-    Balance    *big.Int                         `json:"balance"`
-    Nonce      uint64                           `json:"nonce"`
-    SecretKey  []byte                            `json:"secretKey"`
-}
-
-type Env struct {
-    // required
-    CurrentCoinbase  common.Address      `json:"currentCoinbase"`
-    CurrentGasLimit  uint64              `json:"currentGasLimit"`
-    CurrentNumber    uint64              `json:"currentNumber"`
-    CurrentTimestamp uint64              `json:"currentTimestamp"`
-    Withdrawals      []*Withdrawal       `json:"withdrawals"`
-    // optional
-    CurrentDifficulty *big.Int           `json:"currentDifficulty"`
-    CurrentRandom     *big.Int           `json:"currentRandom"`
-    CurrentBaseFee    *big.Int           `json:"currentBaseFee"`
-    ParentDifficulty  *big.Int           `json:"parentDifficulty"`
-    ParentGasUsed     uint64             `json:"parentGasUsed"`
-    ParentGasLimit    uint64             `json:"parentGasLimit"`
-    ParentTimestamp   uint64             `json:"parentTimestamp"`
-    BlockHashes       map[uint64]common.Hash `json:"blockHashes"`
-    ParentUncleHash   common.Hash        `json:"parentUncleHash"`
-    Ommers            []Ommer            `json:"ommers"`
-}
-
-type LegacyTx struct {
-    Nonce     uint64          `json:"nonce"`
-    GasPrice  *big.Int        `json:"gasPrice"`
-    Gas       uint64          `json:"gas"`
-    To        *common.Address `json:"to"`
-    Value     *big.Int        `json:"value"`
-    Data      []byte          `json:"data"`
-    V         *big.Int        `json:"v"`
-    R         *big.Int        `json:"r"`
-    S         *big.Int        `json:"s"`
-    SecretKey *common.Hash    `json:"secretKey"`
-}
-*/
-
-// NOTE(toms): In EVM, it's interesting what happens with a CALL occurs to an address that
-//   either doesn't exist, or doesn't have any code. It's a valid call, and then VM continues
-//   with defined behavior.
-
-// NOTE(toms): In EVM, it is not possible to return a value directly from the stack. The value
-//   must be first written to memory (e.g. MSTORE), then RETURN'd.
-
-// state: EVM State is a mapping from addresses to accounts.
-// journal: The journal is a wrapper around the state that tracks changes and allows for e.g. rollbacks.
-
-use revm::context::result::{EVMError, ResultAndState};
-use revm::context::{ContextTr, Evm, JournalTr, TxEnv};
-use revm::database::EmptyDB;
-use revm::handler::EthPrecompiles;
-use revm::handler::instructions::EthInstructions;
-use revm::inspector::InspectorEvmTr;
-use revm::inspector::inspectors::GasInspector;
-use revm::interpreter::interpreter::EthInterpreter;
-use revm::interpreter::interpreter_types::{Jumps, LoopControl, MemoryTr};
-use revm::interpreter::{
-    CallInputs, CallOutcome, CreateInputs, CreateOutcome, EOFCreateInputs, Interpreter,
+use revm::{
+    Context, InspectEvm, Inspector, MainContext,
+    context::result::{EVMError, ResultAndState},
+    context::{ContextTr, Evm, JournalTr, TxEnv},
+    database::EmptyDB,
+    handler::EthPrecompiles,
+    handler::instructions::EthInstructions,
+    inspector::InspectorEvmTr,
+    inspector::inspectors::GasInspector,
+    interpreter::interpreter::EthInterpreter,
+    interpreter::interpreter_types::{Jumps, LoopControl, MemoryTr},
+    interpreter::{
+        CallInputs, CallOutcome, CreateInputs, CreateOutcome, EOFCreateInputs, Interpreter,
+    },
+    primitives::{Address, Log, U256, hex},
+    state::Account,
 };
-use revm::primitives::{Address, Log, U256, hex};
-use revm::state::Account;
-use revm::{Context, InspectEvm, Inspector, MainContext};
 use serde::Serialize;
 use std::convert::Infallible;
 
@@ -99,25 +44,9 @@ impl<I: Inspector<Context>> Engine<I> {
 
     pub fn execute(&mut self, tx: TxEnv) -> Result<ResultAndState, EVMError<Infallible>> {
         // NOTE(toms): gas costs will include 'base stipend' (21000)
-
         self.evm.inspect_with_tx(tx)
     }
 }
-
-// TODO(toms): Step (from https://eips.ethereum.org/EIPS/eip-3155)
-//   * pc
-//   * op
-//   * gas
-//   * gasCost
-//   * memSize
-//   * stack
-//   * depth
-//   * returnData
-//   * refund
-//   * opName
-//   * error
-//   * memory
-//   * storage
 
 #[derive(Debug, PartialEq)]
 struct StepPre {
@@ -128,8 +57,8 @@ struct StepPre {
     memory: Option<String>,
 }
 
+// Format inspired by <https://eips.ethereum.org/EIPS/eip-3155>
 #[derive(Debug, Default, PartialEq, Serialize)]
-#[serde(tag = "type")]
 #[serde(rename_all = "camelCase")]
 pub struct Step {
     /// Program Counter
@@ -137,9 +66,9 @@ pub struct Step {
     /// OpCode
     op: u8,
     /// Gas left before executing this operation
-    gas: u64, // U256,
+    gas: u64,
     /// Gas cost of this operation
-    gas_cost: u64, // U256,
+    gas_cost: u64,
     /// Array of all values on the stack
     stack: Box<[U256]>,
     /// Depth of the call stack
@@ -147,32 +76,17 @@ pub struct Step {
     /// Description of an error (should contain revert reason if supported)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    // TODO(toms): array? string?
-    /// Array of all allocated values
+    /// Hex-String representation of all allocated values in memory
     #[serde(default, skip_serializing_if = "Option::is_none")]
     memory: Option<String>,
-    // /// Data returned by function call
-    // return_data: Hex-String,
-    // /// Amount of global gas refunded
-    // refund: U256,
-    // /// Array of all stored values
-    // storage: Key-Value,
 }
 
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "type")]
-#[serde(rename_all = "camelCase")]
 pub enum Event {
+    #[serde(rename = "step")]
     Step(Step),
 }
-
-// TODO(toms): Summary (from https://eips.ethereum.org/EIPS/eip-3155)
-//   * stateRoot
-//   * output
-//   * gasUsed
-//   * pass
-//   * time
-//   * fork
 
 pub trait TracerDelegate {
     fn emit(&mut self, event: Event);
@@ -202,12 +116,6 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
     fn initialize_interp(&mut self, interpreter: &mut Interpreter, _ctx: &mut Context) {
         self.gas_inspector
             .initialize_interp(interpreter.control.gas());
-
-        // TODO(toms): include initial stipend, etc. (InitialAndFloorGas) in trace log?
-        // println!(
-        //     ">>> initialize_interp: {:?}",
-        //     (&ctx.tx, &ctx.block, &ctx.cfg)
-        // );
     }
 
     fn step(&mut self, interpreter: &mut Interpreter, _ctx: &mut Context) {
@@ -236,21 +144,9 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
                 ))
             },
         });
-
-        // self.memory = if self.include_memory {
-        //     Some(hex::encode_prefixed(
-        //         interp.memory.slice(0..interp.memory.size()).as_ref(),
-        //     ))
-        // } else {
-        //     None
-        // };
-
-        // self.refunded = interp.control.gas().refunded();
     }
 
     fn step_end(&mut self, interpreter: &mut Interpreter, ctx: &mut Context) {
-        // println!(">>> step_end");
-
         self.gas_inspector.step_end(interpreter.control.gas_mut());
 
         let step = self.step.take().unwrap();
@@ -270,22 +166,17 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
         }));
     }
 
-    fn log(&mut self, _interpreter: &mut Interpreter, _ctx: &mut Context, _log: Log) {
-        // println!(">>> log");
-    }
+    fn log(&mut self, _interpreter: &mut Interpreter, _ctx: &mut Context, _log: Log) {}
 
     fn call(&mut self, _ctx: &mut Context, _inputs: &mut CallInputs) -> Option<CallOutcome> {
-        // println!(">>> call");
         None
     }
 
     fn call_end(&mut self, _ctx: &mut Context, _inputs: &CallInputs, outcome: &mut CallOutcome) {
-        // println!(">>> call_end");
         self.gas_inspector.call_end(outcome);
     }
 
     fn create(&mut self, _ctx: &mut Context, _inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        // println!(">>> create");
         None
     }
 
@@ -295,7 +186,6 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
         _inputs: &CreateInputs,
         outcome: &mut CreateOutcome,
     ) {
-        // println!(">>> create_end");
         self.gas_inspector.create_end(outcome);
     }
 
@@ -304,7 +194,6 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
         _ctx: &mut Context,
         _inputs: &mut EOFCreateInputs,
     ) -> Option<CreateOutcome> {
-        // println!(">>> eofcreate");
         None
     }
 
@@ -314,32 +203,10 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
         _inputs: &EOFCreateInputs,
         _outcome: &mut CreateOutcome,
     ) {
-        // println!(">>> eofcreate_end");
     }
 
-    fn selfdestruct(&mut self, _contract: Address, _target: Address, _value: U256) {
-        // println!(">>> selfdestruct");
-    }
+    fn selfdestruct(&mut self, _contract: Address, _target: Address, _value: U256) {}
 }
-
-// TODO(toms): tests!
-//   * STATICCALL
-//   * CALL
-//   * CREATE2
-//   * SELFDESTRUCT
-//   * KECCAK256
-//   * EOF?
-//   * Run the code for a _real_ program - ERC-20? key-value store?
-
-// TODO(toms): open questions
-//   * What are all the 'inputs' for a smart code execution?
-//     * Account storage (key-value storage for smart contract accounts)
-//     * Transaction data - CALLDATA
-//   * Storage? MLOAD, SLOAD, TLOAD
-//   * What are log 'topics'?
-//   * BLOBHASH and BLOBBASEFEE - related to BLOBs, introduced as part of EIP-4844 (Proto-Danksharding)
-//   * How does SELFDESTRUCT work?
-//   * Authorization list? Access list?
 
 #[cfg(test)]
 mod tests {
@@ -365,8 +232,6 @@ mod tests {
         values.into_iter().map(U256::from).collect()
     }
 
-    // TODO(toms): use external JSONL files as harnesses for tests (for input and output)
-
     #[test]
     fn experiment() {
         let mut engine = Engine::new(Tracer::new(TestDelegate::default()));
@@ -388,26 +253,10 @@ mod tests {
             ))),
         );
 
-        // TODO(toms): prestate - block environment?
-
         let _ = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address!("ffffffffffffffffffffffffffffffffffffffff")),
                 gas_limit: 0x1000000,
-                // tx_type: 0,
-                // caller: Address::default(),
-                // gas_limit: 30_000_000,
-                // gas_price: 0,
-                // kind: TxKind::Call(Address::default()),
-                // value: U256::ZERO,
-                // data: Bytes::default(),
-                // nonce: 0,
-                // chain_id: Some(1), // Mainnet chain ID is 1
-                // access_list: Default::default(),
-                // gas_priority_fee: Some(0),
-                // blob_hashes: Vec::new(),
-                // max_fee_per_blob_gas: 0,
-                // authorization_list: Vec::new(),
                 ..Default::default()
             })
             .unwrap();
@@ -419,6 +268,11 @@ mod tests {
     fn example() {
         let mut engine = Engine::new(Tracer::new(TestDelegate::default()));
 
+        // # Inspired by <https://eips.ethereum.org/EIPS/eip-3155#test-cases>
+        // λ evm run --code '0x604080536040604055604060006040600060ff5afa6040f3'
+        //     --json --debug --dump --nomemory=false --noreturndata=false
+        //     --sender '0xF0' --receiver '0xF1' --gas 10000000000
+
         engine.create_account(
             address!("ffffffffffffffffffffffffffffffffffffffff"),
             AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from(
@@ -429,8 +283,6 @@ mod tests {
             ))),
         );
 
-        // TODO(toms): prestate - block environment?
-
         let result = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address!("ffffffffffffffffffffffffffffffffffffffff")),
@@ -438,11 +290,6 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-
-        // # https://eips.ethereum.org/EIPS/eip-3155#test-cases
-        // λ evm run --code '0x604080536040604055604060006040600060ff5afa6040f3'
-        //     --json --debug --dump --nomemory=false --noreturndata=false
-        //     --sender '0xF0' --receiver '0xF1' --gas 10000000000
 
         // TODO(toms): check result.state?
         assert_eq!(

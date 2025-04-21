@@ -54,8 +54,19 @@
                 "foo": {
                   "summary": "...",
                   "value": {
-                    "foo": "foo-bar",
-                    "bar": "baz-buz"
+                    "accounts": [
+                      {
+                        "address": "0xffffffffffffffffffffffffffffffffffffffff",
+                        "balance": "0x0",
+                        "nonce": 0,
+                        "code": "0x604080536040604055604060006040600060ff5afa6040f3",
+                        "storage": {}
+                      }
+                    ],
+                    "transaction": {
+                      "type": "call",
+                      "address": "0xffffffffffffffffffffffffffffffffffffffff"
+                    }
                   }
                 }
               }

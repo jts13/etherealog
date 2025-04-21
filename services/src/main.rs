@@ -1,24 +1,18 @@
 use engine::{Engine, Event, Tracer, TracerDelegate};
+use revm::context::result::ResultAndState;
 use revm::{
     bytecode::Bytecode,
     context::TxEnv,
-    primitives::{Bytes, TxKind, address},
-    state::AccountInfo,
+    primitives::{Address, Bytes, TxKind, U256, address},
+    state::{AccountInfo, EvmStorage},
 };
 use rocket::{
     fs::{FileServer, Options},
     serde::json::Json,
 };
 use rocket_okapi::{rapidoc::*, settings::UrlObject, swagger_ui::*};
+use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-
-// TODO(toms): 'test' endpoints
-//   * POST /api/health-check
-// TODO(toms): 'isolate' endpoints
-//   * POST /api/isolate/transaction - execute a transaction in a given state/environment
-//     * prestate - block environment?
-
-// https://learn.openapis.org/examples/v3.0/petstore.html
 
 #[derive(Default)]
 struct Delegate {
@@ -31,9 +25,11 @@ impl TracerDelegate for Delegate {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct Response {
     events: Vec<Event>,
+    // TODO(toms): refine response object in line with <https://eips.ethereum.org/EIPS/eip-3155>
+    summary: ResultAndState,
 }
 
 #[rocket::post("/api/isolate/eval/<code>")]
@@ -49,7 +45,7 @@ fn eval(code: &str) -> Result<Json<Response>, String> {
         )),
     );
 
-    let _ = engine
+    let res = engine
         .execute(TxEnv {
             kind: TxKind::Call(addr),
             gas_limit: 0x1000000,
@@ -59,34 +55,62 @@ fn eval(code: &str) -> Result<Json<Response>, String> {
 
     Ok(Json(Response {
         events: engine.inspector().get().events.split_off(0),
+        summary: res,
     }))
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct Transaction {
-    foo: String,
-    bar: String,
+#[derive(Debug, Serialize, Deserialize)]
+struct Account {
+    address: Address,
+    balance: U256,
+    nonce: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<Bytes>,
+    storage: EvmStorage,
 }
 
-#[rocket::post("/api/isolate/transaction", data = "<transaction>")]
-fn transaction(transaction: Json<Transaction>) -> Result<Json<Response>, String> {
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "camelCase")]
+enum Transaction {
+    Call { address: Address },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Environment {
+    accounts: Box<[Account]>,
+    transaction: Transaction,
+}
+
+#[rocket::post("/api/isolate/transaction", data = "<environment>")]
+fn transaction(environment: Json<Environment>) -> Result<Json<Response>, String> {
     let mut engine = Engine::new(Tracer::new(Delegate::default()));
 
-    let transaction = transaction.0;
-    println!("transaction={transaction:?}");
+    let environment = environment.0;
 
-    let addr = address!("ffffffffffffffffffffffffffffffffffffffff");
+    for Account {
+        address,
+        balance,
+        nonce,
+        code,
+        storage,
+    } in environment.accounts
+    {
+        engine.create_account(
+            address,
+            revm::state::Account::from(match code {
+                None => AccountInfo::from_balance(balance).with_nonce(nonce),
+                Some(code) => AccountInfo::from_bytecode(Bytecode::new_raw(code)),
+            })
+            .with_storage(storage.into_iter()),
+        );
+    }
 
-    engine.create_account(
-        addr,
-        AccountInfo::from_bytecode(Bytecode::new_raw(
-            Bytes::from_str("6040").map_err(|err| err.to_string())?,
-        )),
-    );
-
-    let _ = engine
+    let res = engine
         .execute(TxEnv {
-            kind: TxKind::Call(addr),
+            kind: match environment.transaction {
+                Transaction::Call { address } => TxKind::Call(address),
+            },
             gas_limit: 0x1000000,
             ..Default::default()
         })
@@ -94,6 +118,7 @@ fn transaction(transaction: Json<Transaction>) -> Result<Json<Response>, String>
 
     Ok(Json(Response {
         events: engine.inspector().get().events.split_off(0),
+        summary: res,
     }))
 }
 
