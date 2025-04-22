@@ -69,9 +69,9 @@ struct Environment {
 
 #[rocket::post("/api/isolate/transaction", data = "<environment>")]
 fn transaction(environment: Json<Environment>) -> Result<Json<Response>, String> {
-    let mut engine = Engine::new();
+    let environment = environment.into_inner();
 
-    let environment = environment.0;
+    let mut engine = Engine::new();
 
     for Account {
         address,

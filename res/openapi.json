@@ -51,8 +51,8 @@
                 "type": "object"
               },
               "examples": {
-                "foo": {
-                  "summary": "...",
+                "eip-3155": {
+                  "summary": "Example code from EIP-3155",
                   "value": {
                     "accounts": [
                       {

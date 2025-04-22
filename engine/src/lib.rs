@@ -22,6 +22,12 @@ pub struct Engine {
     evm: Evm<Context, Tracer, EthInstructions<EthInterpreter, Context>, EthPrecompiles>,
 }
 
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self {
@@ -89,14 +95,14 @@ pub enum Event {
     Step(Step),
 }
 
-pub struct Tracer {
+struct Tracer {
     gas_inspector: GasInspector,
     step: Option<StepPre>,
     events: Vec<Event>,
 }
 
 impl Tracer {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self {
             gas_inspector: GasInspector::new(),
             step: None,
