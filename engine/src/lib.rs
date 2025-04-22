@@ -220,35 +220,6 @@ mod tests {
     }
 
     #[test]
-    fn experiment() {
-        let mut engine = Engine::new();
-
-        engine.create_account(
-            address!("ffffffffffffffffffffffffffffffffffffffff"),
-            AccountInfo::from_bytecode(Bytecode::new_raw(
-                Bytes::from_hex("604080536040604055604060006040600060ff5afa6040f3").unwrap(),
-            )),
-        );
-
-        engine.create_account(
-            address!("00000000000000000000000000000000000000ff"),
-            AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from(
-                &[opcode::PUSH2, 0xbe, 0xef, opcode::STOP][..],
-            ))),
-        );
-
-        let _ = engine
-            .execute(TxEnv {
-                kind: TxKind::Call(address!("ffffffffffffffffffffffffffffffffffffffff")),
-                gas_limit: 0x1000000,
-                ..Default::default()
-            })
-            .unwrap();
-
-        // TODO(toms): assert?!
-    }
-
-    #[test]
     fn example() {
         let mut engine = Engine::new();
 
@@ -266,7 +237,7 @@ mod tests {
             AccountInfo::from_bytecode(bytecode.clone()),
         );
 
-        let (result, events) = engine
+        let (res, events) = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address!("ffffffffffffffffffffffffffffffffffffffff")),
                 gas_limit: 0x1000000,
@@ -275,7 +246,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.result,
+            res.result,
             ExecutionResult::Success {
                 reason: SuccessReason::Return,
                 gas_used: 0x60a8 + 21000, // includes base stipend
@@ -285,20 +256,17 @@ mod tests {
             }
         );
 
-        assert_eq!(result.state.len(), 3);
+        assert_eq!(res.state.len(), 3);
         assert!(
-            result
-                .state
+            res.state
                 .contains_key(&address!("ffffffffffffffffffffffffffffffffffffffff"))
         );
         assert!(
-            result
-                .state
+            res.state
                 .contains_key(&address!("0000000000000000000000000000000000000000"))
         );
         assert!(
-            result
-                .state
+            res.state
                 .contains_key(&address!("00000000000000000000000000000000000000ff"))
         );
 
@@ -468,7 +436,7 @@ mod tests {
         let address = address!("ffffffffffffffffffffffffffffffffffffffff");
         engine.create_account(address, AccountInfo::default());
 
-        let (result, events) = engine
+        let (res, events) = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address),
                 ..Default::default()
@@ -476,7 +444,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.result,
+            res.result,
             ExecutionResult::Success {
                 reason: SuccessReason::Stop,
                 gas_used: 21000, // base stipend
@@ -494,12 +462,10 @@ mod tests {
         let mut engine = Engine::new();
 
         let address = address!("ffffffffffffffffffffffffffffffffffffffff");
-        engine.create_account(
-            address,
-            AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from(&[0x60, 0x40][..]))),
-        );
+        let bytecode = Bytecode::new_raw(Bytes::from_hex("6040").unwrap());
+        engine.create_account(address, AccountInfo::from_bytecode(bytecode));
 
-        let (result, events) = engine
+        let (res, events) = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address),
                 ..Default::default()
@@ -507,7 +473,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            result.result,
+            res.result,
             ExecutionResult::Success {
                 reason: SuccessReason::Stop,
                 gas_used: 3 + 21000, // includes base stipend
