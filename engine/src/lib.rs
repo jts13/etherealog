@@ -1,16 +1,16 @@
 use revm::{
-    Context, InspectEvm, Inspector, MainContext,
-    context::result::{EVMError, ResultAndState},
-    context::{ContextTr, Evm, JournalTr, TxEnv},
+    Context, InspectEvm, MainContext,
+    context::{
+        ContextTr, Evm, JournalTr, TxEnv,
+        result::{EVMError, ResultAndState},
+    },
     database::EmptyDB,
-    handler::EthPrecompiles,
-    handler::instructions::EthInstructions,
-    inspector::InspectorEvmTr,
-    inspector::inspectors::GasInspector,
-    interpreter::interpreter::EthInterpreter,
-    interpreter::interpreter_types::{Jumps, LoopControl, MemoryTr},
+    handler::{EthPrecompiles, instructions::EthInstructions},
+    inspector::{InspectorEvmTr, inspectors::GasInspector},
     interpreter::{
         CallInputs, CallOutcome, CreateInputs, CreateOutcome, EOFCreateInputs, Interpreter,
+        interpreter::EthInterpreter,
+        interpreter_types::{Jumps, LoopControl, MemoryTr},
     },
     primitives::{Address, Log, U256, hex},
     state::Account,
@@ -18,33 +18,34 @@ use revm::{
 use serde::Serialize;
 use std::convert::Infallible;
 
-pub struct Engine<I> {
-    evm: Evm<Context, I, EthInstructions<EthInterpreter, Context>, EthPrecompiles>,
+pub struct Engine {
+    evm: Evm<Context, Tracer, EthInstructions<EthInterpreter, Context>, EthPrecompiles>,
 }
 
-impl<I: Inspector<Context>> Engine<I> {
-    pub fn new(inspector: I) -> Self {
+impl Engine {
+    pub fn new() -> Self {
         Self {
             evm: Evm::new_with_inspector(
                 Context::mainnet().with_db(EmptyDB::default()),
-                inspector,
+                Tracer::new(),
                 EthInstructions::new_mainnet(),
                 EthPrecompiles::default(),
             ),
         }
     }
 
-    pub fn inspector(&mut self) -> &mut I {
-        self.evm.inspector()
-    }
-
     pub fn create_account(&mut self, address: Address, account: impl Into<Account>) {
         self.evm.journal().state().insert(address, account.into());
     }
 
-    pub fn execute(&mut self, tx: TxEnv) -> Result<ResultAndState, EVMError<Infallible>> {
+    pub fn execute(
+        &mut self,
+        tx: TxEnv,
+    ) -> Result<(ResultAndState, Vec<Event>), EVMError<Infallible>> {
         // NOTE(toms): gas costs will include 'base stipend' (21000)
-        self.evm.inspect_with_tx(tx)
+        let res = self.evm.inspect_with_tx(tx)?;
+        let events = self.evm.inspector().events.split_off(0);
+        Ok((res, events))
     }
 }
 
@@ -88,31 +89,23 @@ pub enum Event {
     Step(Step),
 }
 
-pub trait TracerDelegate {
-    fn emit(&mut self, event: Event);
-}
-
-pub struct Tracer<D> {
+pub struct Tracer {
     gas_inspector: GasInspector,
     step: Option<StepPre>,
-    delegate: D,
+    events: Vec<Event>,
 }
 
-impl<D> Tracer<D> {
-    pub fn new(delegate: D) -> Self {
+impl Tracer {
+    pub fn new() -> Self {
         Self {
             gas_inspector: GasInspector::new(),
             step: None,
-            delegate,
+            events: Default::default(),
         }
-    }
-
-    pub fn get(&mut self) -> &mut D {
-        &mut self.delegate
     }
 }
 
-impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
+impl revm::Inspector<Context> for Tracer {
     fn initialize_interp(&mut self, interpreter: &mut Interpreter, _ctx: &mut Context) {
         self.gas_inspector
             .initialize_interp(interpreter.control.gas());
@@ -151,7 +144,7 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
 
         let step = self.step.take().unwrap();
 
-        self.delegate.emit(Event::Step(Step {
+        self.events.push(Event::Step(Step {
             pc: step.pc,
             op: step.op,
             stack: step.stack,
@@ -211,22 +204,16 @@ impl<D: TracerDelegate> revm::Inspector<Context> for Tracer<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revm::bytecode::{Bytecode, opcode};
-    use revm::context::TxEnv;
-    use revm::context::result::{Output, SuccessReason};
-    use revm::context_interface::result::ExecutionResult;
-    use revm::primitives::{Bytes, TxKind, address};
-    use revm::state::AccountInfo;
-
-    #[derive(Default)]
-    struct TestDelegate {
-        events: Vec<Event>,
-    }
-    impl TracerDelegate for TestDelegate {
-        fn emit(&mut self, event: Event) {
-            self.events.push(event);
-        }
-    }
+    use revm::{
+        bytecode::{Bytecode, opcode},
+        context::{
+            TxEnv,
+            result::{Output, SuccessReason},
+        },
+        context_interface::result::ExecutionResult,
+        primitives::{Bytes, TxKind, address, hex::FromHex},
+        state::AccountInfo,
+    };
 
     fn stack(values: impl IntoIterator<Item = u64>) -> Box<[U256]> {
         values.into_iter().map(U256::from).collect()
@@ -234,16 +221,13 @@ mod tests {
 
     #[test]
     fn experiment() {
-        let mut engine = Engine::new(Tracer::new(TestDelegate::default()));
+        let mut engine = Engine::new();
 
         engine.create_account(
             address!("ffffffffffffffffffffffffffffffffffffffff"),
-            AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from(
-                &[
-                    0x60, 0x40, 0x80, 0x53, 0x60, 0x40, 0x60, 0x40, 0x55, 0x60, 0x40, 0x60, 0x00,
-                    0x60, 0x40, 0x60, 0x00, 0x60, 0xff, 0x5a, 0xfa, 0x60, 0x40, 0xf3,
-                ][..],
-            ))),
+            AccountInfo::from_bytecode(Bytecode::new_raw(
+                Bytes::from_hex("604080536040604055604060006040600060ff5afa6040f3").unwrap(),
+            )),
         );
 
         engine.create_account(
@@ -266,24 +250,23 @@ mod tests {
 
     #[test]
     fn example() {
-        let mut engine = Engine::new(Tracer::new(TestDelegate::default()));
+        let mut engine = Engine::new();
 
         // # Inspired by <https://eips.ethereum.org/EIPS/eip-3155#test-cases>
         // λ evm run --code '0x604080536040604055604060006040600060ff5afa6040f3'
         //     --json --debug --dump --nomemory=false --noreturndata=false
         //     --sender '0xF0' --receiver '0xF1' --gas 10000000000
 
-        engine.create_account(
-            address!("ffffffffffffffffffffffffffffffffffffffff"),
-            AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from(
-                &[
-                    0x60, 0x40, 0x80, 0x53, 0x60, 0x40, 0x60, 0x40, 0x55, 0x60, 0x40, 0x60, 0x00,
-                    0x60, 0x40, 0x60, 0x00, 0x60, 0xff, 0x5a, 0xfa, 0x60, 0x40, 0xf3,
-                ][..],
-            ))),
+        let bytecode = Bytecode::new_raw(
+            Bytes::from_hex("604080536040604055604060006040600060ff5afa6040f3").unwrap(),
         );
 
-        let result = engine
+        engine.create_account(
+            address!("ffffffffffffffffffffffffffffffffffffffff"),
+            AccountInfo::from_bytecode(bytecode.clone()),
+        );
+
+        let (result, events) = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address!("ffffffffffffffffffffffffffffffffffffffff")),
                 gas_limit: 0x1000000,
@@ -291,7 +274,6 @@ mod tests {
             })
             .unwrap();
 
-        // TODO(toms): check result.state?
         assert_eq!(
             result.result,
             ExecutionResult::Success {
@@ -301,6 +283,23 @@ mod tests {
                 logs: vec![],
                 output: Output::Call([0x40].into()),
             }
+        );
+
+        assert_eq!(result.state.len(), 3);
+        assert!(
+            result
+                .state
+                .contains_key(&address!("ffffffffffffffffffffffffffffffffffffffff"))
+        );
+        assert!(
+            result
+                .state
+                .contains_key(&address!("0000000000000000000000000000000000000000"))
+        );
+        assert!(
+            result
+                .state
+                .contains_key(&address!("00000000000000000000000000000000000000ff"))
         );
 
         let memory = "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000";
@@ -455,8 +454,7 @@ mod tests {
             }),
         ];
 
-        let actual = &engine.inspector().delegate.events;
-
+        let actual = events;
         assert_eq!(actual.len(), expected.len());
         for (n, (actual, expected)) in actual.iter().zip(expected.iter()).enumerate() {
             assert_eq!(actual, expected, "Item {n} did not match!");
@@ -465,12 +463,12 @@ mod tests {
 
     #[test]
     fn empty() {
-        let mut engine = Engine::new(Tracer::new(TestDelegate::default()));
+        let mut engine = Engine::new();
 
         let address = address!("ffffffffffffffffffffffffffffffffffffffff");
         engine.create_account(address, AccountInfo::default());
 
-        let result = engine
+        let (result, events) = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address),
                 ..Default::default()
@@ -488,12 +486,12 @@ mod tests {
             }
         );
 
-        assert_eq!(engine.inspector().delegate.events, &[]);
+        assert_eq!(events, &[]);
     }
 
     #[test]
     fn simple() {
-        let mut engine = Engine::new(Tracer::new(TestDelegate::default()));
+        let mut engine = Engine::new();
 
         let address = address!("ffffffffffffffffffffffffffffffffffffffff");
         engine.create_account(
@@ -501,7 +499,7 @@ mod tests {
             AccountInfo::from_bytecode(Bytecode::new_raw(Bytes::from(&[0x60, 0x40][..]))),
         );
 
-        let result = engine
+        let (result, events) = engine
             .execute(TxEnv {
                 kind: TxKind::Call(address),
                 ..Default::default()
@@ -520,7 +518,7 @@ mod tests {
         );
 
         assert_eq!(
-            engine.inspector().delegate.events,
+            events,
             &[
                 Event::Step(Step {
                     pc: 0,

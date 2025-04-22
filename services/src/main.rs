@@ -1,8 +1,7 @@
-use engine::{Engine, Event, Tracer, TracerDelegate};
-use revm::context::result::ResultAndState;
+use engine::{Engine, Event};
 use revm::{
     bytecode::Bytecode,
-    context::TxEnv,
+    context::{TxEnv, result::ResultAndState},
     primitives::{Address, Bytes, TxKind, U256, address},
     state::{AccountInfo, EvmStorage},
 };
@@ -14,17 +13,6 @@ use rocket_okapi::{rapidoc::*, settings::UrlObject, swagger_ui::*};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
-#[derive(Default)]
-struct Delegate {
-    events: Vec<Event>,
-}
-
-impl TracerDelegate for Delegate {
-    fn emit(&mut self, event: Event) {
-        self.events.push(event);
-    }
-}
-
 #[derive(Debug, serde::Serialize)]
 struct Response {
     events: Vec<Event>,
@@ -34,7 +22,7 @@ struct Response {
 
 #[rocket::post("/api/isolate/eval/<code>")]
 fn eval(code: &str) -> Result<Json<Response>, String> {
-    let mut engine = Engine::new(Tracer::new(Delegate::default()));
+    let mut engine = Engine::new();
 
     let addr = address!("ffffffffffffffffffffffffffffffffffffffff");
 
@@ -45,7 +33,7 @@ fn eval(code: &str) -> Result<Json<Response>, String> {
         )),
     );
 
-    let res = engine
+    let (summary, events) = engine
         .execute(TxEnv {
             kind: TxKind::Call(addr),
             gas_limit: 0x1000000,
@@ -53,10 +41,7 @@ fn eval(code: &str) -> Result<Json<Response>, String> {
         })
         .map_err(|err| err.to_string())?;
 
-    Ok(Json(Response {
-        events: engine.inspector().get().events.split_off(0),
-        summary: res,
-    }))
+    Ok(Json(Response { events, summary }))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -84,7 +69,7 @@ struct Environment {
 
 #[rocket::post("/api/isolate/transaction", data = "<environment>")]
 fn transaction(environment: Json<Environment>) -> Result<Json<Response>, String> {
-    let mut engine = Engine::new(Tracer::new(Delegate::default()));
+    let mut engine = Engine::new();
 
     let environment = environment.0;
 
@@ -106,7 +91,7 @@ fn transaction(environment: Json<Environment>) -> Result<Json<Response>, String>
         );
     }
 
-    let res = engine
+    let (summary, events) = engine
         .execute(TxEnv {
             kind: match environment.transaction {
                 Transaction::Call { address } => TxKind::Call(address),
@@ -116,10 +101,7 @@ fn transaction(environment: Json<Environment>) -> Result<Json<Response>, String>
         })
         .map_err(|err| err.to_string())?;
 
-    Ok(Json(Response {
-        events: engine.inspector().get().events.split_off(0),
-        summary: res,
-    }))
+    Ok(Json(Response { events, summary }))
 }
 
 #[rocket::launch]
