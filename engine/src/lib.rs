@@ -207,9 +207,17 @@ impl revm::Inspector<Context> for Tracer {
     fn selfdestruct(&mut self, _contract: Address, _target: Address, _value: U256) {}
 }
 
+// TODO(toms): Following features could be interesting to unit test in the engine:
+//   * CALL
+//   * CREATE2
+//   * KECCAK256
+//   * EOF
+//   * Real programs e.g. ERC-20, key-value store
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use revm::context::result::HaltReason;
     use revm::{
         bytecode::{Bytecode, opcode},
         context::{
@@ -511,6 +519,95 @@ mod tests {
                     ..Default::default()
                 })
             ]
+        );
+    }
+
+    #[test]
+    fn selfdestruct() {
+        let mut engine = Engine::new();
+
+        let address = address!("ffffffffffffffffffffffffffffffffffffffff");
+        let bytecode = Bytecode::new_raw(Bytes::from([opcode::PUSH0, opcode::SELFDESTRUCT]));
+        engine.create_account(address, AccountInfo::from_bytecode(bytecode));
+
+        let (res, events) = engine
+            .execute(TxEnv {
+                kind: TxKind::Call(address),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            res.result,
+            ExecutionResult::Success {
+                reason: SuccessReason::SelfDestruct,
+                gas_used: 26002,
+                gas_refunded: 0,
+                logs: vec![],
+                output: Output::Call([].into()),
+            }
+        );
+
+        assert_eq!(
+            events,
+            &[
+                Event::Step(Step {
+                    pc: 0,
+                    op: opcode::PUSH0,
+                    stack: stack([]),
+                    gas: 29979000,
+                    gas_cost: 2,
+                    depth: 1,
+                    ..Default::default()
+                }),
+                Event::Step(Step {
+                    pc: 1,
+                    op: opcode::SELFDESTRUCT,
+                    stack: stack([0]),
+                    gas: 29978998,
+                    gas_cost: 5000,
+                    depth: 1,
+                    ..Default::default()
+                })
+            ]
+        );
+    }
+
+    #[test]
+    fn underflow() {
+        let mut engine = Engine::new();
+
+        let address = address!("ffffffffffffffffffffffffffffffffffffffff");
+        let bytecode = Bytecode::new_raw(Bytes::from([opcode::POP]));
+        engine.create_account(address, AccountInfo::from_bytecode(bytecode));
+
+        let (res, events) = engine
+            .execute(TxEnv {
+                kind: TxKind::Call(address),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            res.result,
+            ExecutionResult::Halt {
+                reason: HaltReason::StackUnderflow,
+                gas_used: 30000000
+            }
+        );
+
+        assert_eq!(
+            events,
+            &[Event::Step(Step {
+                pc: 0,
+                op: opcode::POP,
+                stack: stack([]),
+                gas: 29979000,
+                gas_cost: 2,
+                depth: 1,
+                error: Some("StackUnderflow".into()),
+                ..Default::default()
+            })]
         );
     }
 }
