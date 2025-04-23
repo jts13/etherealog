@@ -210,7 +210,6 @@ impl revm::Inspector<Context> for Tracer {
 // TODO(toms): Following features could be interesting to unit test in the engine:
 //   * CALL
 //   * CREATE2
-//   * KECCAK256
 //   * EOF
 //   * Real programs e.g. ERC-20, key-value store
 
@@ -218,6 +217,7 @@ impl revm::Inspector<Context> for Tracer {
 mod tests {
     use super::*;
     use revm::context::result::HaltReason;
+    use revm::primitives::KECCAK_EMPTY;
     use revm::{
         bytecode::{Bytecode, opcode},
         context::{
@@ -608,6 +608,44 @@ mod tests {
                 error: Some("StackUnderflow".into()),
                 ..Default::default()
             })]
+        );
+    }
+
+    #[test]
+    fn keccak256() {
+        let mut engine = Engine::new();
+
+        // pseudocode: return keccak256([])
+        let address = address!("ffffffffffffffffffffffffffffffffffffffff");
+        let bytecode = Bytecode::new_raw(Bytes::from([
+            opcode::PUSH0, // size
+            opcode::PUSH0, // offset
+            opcode::KECCAK256,
+            opcode::PUSH0, // offset
+            opcode::MSTORE,
+            opcode::PUSH1, // size
+            0x20,          // 32
+            opcode::PUSH0, // offset
+            opcode::RETURN,
+        ]));
+        engine.create_account(address, AccountInfo::from_bytecode(bytecode));
+
+        let (res, _events) = engine
+            .execute(TxEnv {
+                kind: TxKind::Call(address),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            res.result,
+            ExecutionResult::Success {
+                reason: SuccessReason::Return,
+                gas_used: 21047,
+                gas_refunded: 0,
+                logs: vec![],
+                output: Output::Call(KECCAK_EMPTY.into()),
+            }
         );
     }
 }
