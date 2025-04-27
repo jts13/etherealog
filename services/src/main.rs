@@ -58,7 +58,10 @@ struct Account {
 #[serde(tag = "type")]
 #[serde(rename_all = "camelCase")]
 enum Transaction {
-    Call { address: Address },
+    Call {
+        address: Address,
+        data: Option<Bytes>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,12 +95,13 @@ fn transaction(environment: Json<Environment>) -> Result<Json<Response>, String>
     }
 
     let (summary, events) = engine
-        .execute(TxEnv {
-            kind: match environment.transaction {
-                Transaction::Call { address } => TxKind::Call(address),
+        .execute(match environment.transaction {
+            Transaction::Call { address, data } => TxEnv {
+                kind: TxKind::Call(address),
+                data: data.unwrap_or_default(),
+                gas_limit: 0x1000000,
+                ..Default::default()
             },
-            gas_limit: 0x1000000,
-            ..Default::default()
         })
         .map_err(|err| err.to_string())?;
 

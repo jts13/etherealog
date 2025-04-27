@@ -648,4 +648,42 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn echo() {
+        let mut engine = Engine::new();
+
+        let address = address!("ffffffffffffffffffffffffffffffffffffffff");
+        let bytecode = Bytecode::new_raw(Bytes::from([
+            // ;; copy call-data to memory
+            opcode::CALLDATASIZE, // size
+            opcode::PUSH0,        // offset
+            opcode::PUSH0,        // destOffset
+            opcode::CALLDATACOPY,
+            // ;; return (copied) call-data
+            opcode::CALLDATASIZE, // size
+            opcode::PUSH0,        // offset
+            opcode::RETURN,
+        ]));
+        engine.create_account(address, AccountInfo::from_bytecode(bytecode));
+
+        let (res, _events) = engine
+            .execute(TxEnv {
+                kind: TxKind::Call(address),
+                data: [0xBE, 0xEF, 0x12, 0x34].into(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(
+            res.result,
+            ExecutionResult::Success {
+                reason: SuccessReason::Return,
+                gas_used: 21160,
+                gas_refunded: 0,
+                logs: vec![],
+                output: Output::Call([0xBE, 0xEF, 0x12, 0x34].into()),
+            }
+        );
+    }
 }

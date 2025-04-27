@@ -68,6 +68,25 @@
                       "address": "0xffffffffffffffffffffffffffffffffffffffff"
                     }
                   }
+                },
+                "echo": {
+                  "summary": "Simple echo of input data",
+                  "value": {
+                    "accounts": [
+                      {
+                        "address": "0xffffffffffffffffffffffffffffffffffffffff",
+                        "balance": "0x0",
+                        "nonce": 0,
+                        "code": "0x365f5f37365ff3",
+                        "storage": {}
+                      }
+                    ],
+                    "transaction": {
+                      "type": "call",
+                      "address": "0xffffffffffffffffffffffffffffffffffffffff",
+                      "data": "0x1234567890"
+                    }
+                  }
                 }
               }
             }
