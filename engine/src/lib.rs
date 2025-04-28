@@ -207,12 +207,6 @@ impl revm::Inspector<Context> for Tracer {
     fn selfdestruct(&mut self, _contract: Address, _target: Address, _value: U256) {}
 }
 
-// TODO(toms): Following features could be interesting to unit test in the engine:
-//   * CALL
-//   * CREATE2
-//   * EOF
-//   * Real programs e.g. ERC-20, key-value store
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +222,10 @@ mod tests {
         primitives::{Bytes, TxKind, address, hex::FromHex},
         state::AccountInfo,
     };
+
+    macro_rules! assert_matches {
+        ($lhs:expr, $rhs:pat $(,)?) => {{ assert!(matches!($lhs, $rhs), "match failed: {:?}", $lhs) }};
+    }
 
     fn stack(values: impl IntoIterator<Item = u64>) -> Box<[U256]> {
         values.into_iter().map(U256::from).collect()
@@ -270,19 +268,18 @@ mod tests {
             }
         );
 
-        assert_eq!(res.state.len(), 3);
-        assert!(
-            res.state
-                .contains_key(&address!("ffffffffffffffffffffffffffffffffffffffff"))
-        );
-        assert!(
-            res.state
-                .contains_key(&address!("0000000000000000000000000000000000000000"))
-        );
-        assert!(
-            res.state
-                .contains_key(&address!("00000000000000000000000000000000000000ff"))
-        );
+        {
+            let mut accounts: Vec<_> = res.state.keys().copied().collect();
+            accounts.sort();
+            assert_eq!(
+                accounts,
+                [
+                    address!("0000000000000000000000000000000000000000"),
+                    address!("00000000000000000000000000000000000000ff"),
+                    address!("ffffffffffffffffffffffffffffffffffffffff"),
+                ]
+            );
+        }
 
         let memory = "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000000000000000000000000000000000000000000000000000000000000";
 
@@ -685,5 +682,98 @@ mod tests {
                 output: Output::Call([0xBE, 0xEF, 0x12, 0x34].into()),
             }
         );
+
+        assert_eq!(res.state.len(), 2);
+    }
+
+    #[test]
+    fn create2() {
+        let mut engine = Engine::new();
+
+        let address = address!("ffffffffffffffffffffffffffffffffffffffff");
+        let bytecode = Bytecode::new_raw(Bytes::from([
+            // ;; copy call-data to memory
+            opcode::CALLDATASIZE, // size
+            opcode::PUSH0,        // offset
+            opcode::PUSH0,        // destOffset
+            opcode::CALLDATACOPY,
+            // ;; create2
+            opcode::PUSH0, // `salt`: 32-byte value used to create the new account at a deterministic address
+            opcode::CALLDATASIZE, // `size`: byte size to copy (for initialisation code)
+            opcode::PUSH0, // `offset`: byte offset in the memory in bytes (for initialisation code)
+            opcode::PUSH0, // `value`: value in wei to send to the new account
+            opcode::CREATE2,
+        ]));
+        engine.create_account(address, AccountInfo::from_bytecode(bytecode));
+
+        let (res, _events) = engine
+            .execute(TxEnv {
+                kind: TxKind::Call(address),
+                data: [
+                    // ;; initialization code (passed as call-data)
+                    opcode::PUSH0, // size
+                    opcode::PUSH0, // offset
+                    opcode::RETURN,
+                ]
+                .into(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_matches!(
+            res.result,
+            ExecutionResult::Success {
+                reason: SuccessReason::Stop,
+                ..
+            }
+        );
+
+        {
+            let mut accounts: Vec<_> = res.state.keys().copied().collect();
+            accounts.sort();
+            assert_eq!(
+                accounts,
+                [
+                    address!("0000000000000000000000000000000000000000"),
+                    address!("2f2d12af7f357a9d2f36d276da056a7c2272decb"),
+                    address!("ffffffffffffffffffffffffffffffffffffffff"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn call() {
+        let mut engine = Engine::new();
+
+        let address = address!("ffffffffffffffffffffffffffffffffffffffff");
+        let bytecode = Bytecode::new_raw(Bytes::from([
+            opcode::PUSH0, // `retSize`: byte size to copy (size of the return data).
+            opcode::PUSH0, // `retOffset`: byte offset in the memory in bytes, where to store the return data of the sub context.
+            opcode::PUSH0, // `argsSize`: byte size to copy (size of the calldata).
+            opcode::PUSH0, // `argsOffset`: byte offset in the memory in bytes, the calldata of the sub context.
+            opcode::PUSH0, // `value`: value in wei to send to the account.
+            opcode::PUSH0, // `address`: the account which context to execute.
+            opcode::GAS, // `gas`: amount of gas to send to the sub context to execute. The gas that is not used by the sub context is returned to this one.
+            opcode::CALL,
+        ]));
+        engine.create_account(address, AccountInfo::from_bytecode(bytecode));
+
+        let (res, _events) = engine
+            .execute(TxEnv {
+                kind: TxKind::Call(address),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_matches!(
+            res.result,
+            ExecutionResult::Success {
+                reason: SuccessReason::Stop,
+                ..
+            }
+        );
+
+        assert_eq!(res.state.len(), 2);
     }
 }
