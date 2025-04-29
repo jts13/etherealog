@@ -37,21 +37,21 @@ impl Write for FlushWriter {
 }
 
 // This API key is acquired from <developer.metamask.io> and looks something like `c60b0bb42f8a4c6481ecd229eddaca27`
-const API_KEY: &str = "7ea660cf289d4e1f9464a29a84584b92";
+// const API_KEY: &str = "7ea660cf289d4e1f9464a29a84584b92";
 use std::time::Duration;
 use tokio::time::sleep;
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn gen_trace(api_key: &str, block_number: u64) -> anyhow::Result<()> {
     // Set up the HTTP transport which is consumed by the RPC client.
     
-    let rpc_url = format!("https://mainnet.infura.io/v3/{API_KEY}").parse()?;
+    let rpc_url = format!("https://mainnet.infura.io/v3/{api_key}").parse()?;
 
     // Create a provider
     let client = ProviderBuilder::new().on_http(rpc_url);
 
     // Params
     let chain_id: u64 = 1;
-    let block_number = 10889447;
+    // let block_number = 10889447;
 
     // Fetch the transaction-rich block
     let block = match client
@@ -172,4 +172,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+fn main() -> anyhow::Result<()> {
+    let api_key = "7ea660cf289d4e1f9464a29a84584b92";
+    let block_number = 10889447;
+    gen_trace(api_key, block_number)
 }
