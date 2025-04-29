@@ -38,10 +38,12 @@ impl Write for FlushWriter {
 
 // This API key is acquired from <developer.metamask.io> and looks something like `c60b0bb42f8a4c6481ecd229eddaca27`
 const API_KEY: &str = "7ea660cf289d4e1f9464a29a84584b92";
-
+use std::time::Duration;
+use tokio::time::sleep;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Set up the HTTP transport which is consumed by the RPC client.
+    
     let rpc_url = format!("https://mainnet.infura.io/v3/{API_KEY}").parse()?;
 
     // Create a provider
@@ -114,6 +116,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     for tx in transactions.iter().take(txs) {
+        sleep(Duration::from_millis(250)).await; 
         evm.modify_tx(|etx| {
             etx.caller = tx.inner.signer();
             etx.gas_limit = tx.gas_limit();
