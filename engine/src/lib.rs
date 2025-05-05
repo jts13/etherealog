@@ -1,3 +1,49 @@
+//! EVM execution engine with support step-wise execution traces
+//!
+//! This module provides an [`Engine`] for executing Ethereum Virtual Machine (EVM) code and
+//! transactions using the [`revm`] crate. The [`Engine`] provides a trace of the execution of
+//! each step of the programs (i.e. smart contracts) in the transaction.
+//!
+//! # Example
+//!
+//! ```
+//! # use engine::Engine;
+//! # use revm::{
+//! #     bytecode::Bytecode,
+//! #     context::TxEnv,
+//! #     primitives::{Bytes, TxKind, address},
+//! #     state::AccountInfo,
+//! # };
+//! fn main() {
+//!     let mut engine = Engine::new();
+//!
+//!     // Create an ephemeral account with a simple bytecode contract/program
+//!     let bytecode = Bytecode::new_raw(Bytes::from([0x60, 0x40]));
+//!     let account = AccountInfo::from_bytecode(bytecode);
+//!     let addr = address!("ffffffffffffffffffffffffffffffffffffffff");
+//!     engine.create_account(addr, account);
+//!
+//!     // Execute a transaction calling the created (contract) account's address
+//!     let (res, events) = engine
+//!         .execute(TxEnv {
+//!             kind: TxKind::Call(addr),
+//!             ..Default::default()
+//!         })
+//!         .unwrap();
+//!
+//!     // Log the result and state from the executed transaction
+//!     println!("res={:?}", res);
+//!
+//!     // Log the events from the executed transaction
+//!     for event in events {
+//!         println!("event={event:?}");
+//!     }
+//! }
+//! ```
+//!
+
+#![deny(missing_docs)]
+
 use revm::{
     Context, InspectEvm, MainContext,
     context::{
@@ -18,6 +64,7 @@ use revm::{
 use serde::Serialize;
 use std::convert::Infallible;
 
+/// Ethereum Virtual Machine execution engine with event tracing support
 pub struct Engine {
     evm: Evm<Context, Tracer, EthInstructions<EthInterpreter, Context>, EthPrecompiles>,
 }
@@ -29,6 +76,7 @@ impl Default for Engine {
 }
 
 impl Engine {
+    /// Constructs a new EVM engine instance with mainnet configuration and tracing enabled
     pub fn new() -> Self {
         Self {
             evm: Evm::new_with_inspector(
@@ -40,10 +88,12 @@ impl Engine {
         }
     }
 
+    /// Creates a new account in the engine's EVM state
     pub fn create_account(&mut self, address: Address, account: impl Into<Account>) {
         self.evm.journal().state().insert(address, account.into());
     }
 
+    /// Executes a transaction and returns the result and associated events
     pub fn execute(
         &mut self,
         tx: TxEnv,
@@ -64,7 +114,20 @@ struct StepPre {
     memory: Option<String>,
 }
 
-// Format inspired by <https://eips.ethereum.org/EIPS/eip-3155>
+/// A single step of the EVM engine - inspired by <https://eips.ethereum.org/EIPS/eip-3155>
+///
+/// # Example (as serialized JSON)
+///
+/// ```json
+/// {
+///   "pc": 0,
+///   "op": 96,
+///   "gas": 2250,
+///   "gasCost": 3,
+///   "stack": [],
+///   "depth": 1
+/// }
+/// ```
 #[derive(Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Step {
@@ -88,9 +151,11 @@ pub struct Step {
     memory: Option<String>,
 }
 
+/// Tracing events captured during EVM execution
 #[derive(Debug, PartialEq, Serialize)]
 #[serde(tag = "type")]
 pub enum Event {
+    /// A single step of the EVM engine
     #[serde(rename = "step")]
     Step(Step),
 }
